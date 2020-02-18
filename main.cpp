@@ -34,10 +34,14 @@ using namespace std;
 #define EXIT_FAILURE 1
 
 int status;
+int counter = 0;
+int pipefd[100][2];
 
 void executeCommand(shell_command command_struct) {
 
   pid_t pid;
+  counter++;
+
   vector<string> args = command_struct.args;
   string command = command_struct.cmd;
   if(command == "ls") {
@@ -51,6 +55,17 @@ void executeCommand(shell_command command_struct) {
 
   arglist.push_back(NULL);
 
+  //piping
+  //&& command_struct.cin_mode != istream_mode::pipe
+  if(command_struct.cout_mode == ostream_mode::pipe) {
+
+    if (pipe(pipefd[counter]) < 0) {
+      printf("\nPipe could not be initialized");
+      return;
+    }
+  }
+
+  //Forking for new child process
   pid = fork();
 
   if (pid == -1) {
@@ -61,6 +76,7 @@ void executeCommand(shell_command command_struct) {
 
     int file_desc;
 
+    // redirection for reading from a file
     if(command_struct.cin_file.size() > 0 ) {
       string filename = command_struct.cin_file;
       file_desc = open(filename.c_str(), O_RDONLY);
@@ -68,13 +84,14 @@ void executeCommand(shell_command command_struct) {
       close(file_desc);
     }
 
-
+    // redireciton for writing or appending to file
     if(command_struct.cout_file.size() > 0) {
       string filename = command_struct.cout_file;
       //Append to the file
       if(command_struct.cout_mode == ostream_mode::append) {
         file_desc = open(filename.c_str(), O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IRGRP | S_IWGRP | S_IWUSR);
       }
+      //creates a new file everytime
       else {
         file_desc = open(filename.c_str(), O_WRONLY | O_CREAT, S_IRUSR | S_IRGRP | S_IWGRP | S_IWUSR);
       }
@@ -82,18 +99,48 @@ void executeCommand(shell_command command_struct) {
       close(file_desc);
     }
 
+    /* if the current command is related to previous command */
+    /* Reading from the pipe created earlier*/
+    if(command_struct.cin_mode == istream_mode::pipe) {
+      close(pipefd[counter-1][1]); /* Close unused write end */
+      dup2(pipefd[counter-1][0], STDIN_FILENO);
+      close(pipefd[counter-1][0]);
+    }
+
+    /*Child writes the current command to the newly created pipe*/
+    if (command_struct.cout_mode == ostream_mode::pipe) {
+      close(pipefd[counter][0]); /* Close unused read end */
+      dup2(pipefd[counter][1], STDOUT_FILENO);
+      // close(pipefd[counter][1]);
+    }
+
     if (execvp(command.c_str(), arglist.data()) < 0) {
       cout << "\n Could not execute command.." << endl;
       exit(EXIT_FAILURE);
     }
 
+    /* Setting file_desc back to zero*/
     file_desc = 0;
   }
   else {
-    wait(&status);
+    if(command_struct.cin_mode == istream_mode::pipe) {
+      close(pipefd[counter-1][0]);
+      close(pipefd[counter-1][1]);
+    }
+    /* Don't wait for the child to exit incase of writing to a pipe, else will result in a hang*/
+    if (command_struct.cout_mode == ostream_mode::pipe){
+      return;
+    }
+    for (int i = 0; i < counter; i++) {
+      wait(&status);
+    }
+
+
+    counter = 0;
+
     return;
   }
-
+  exit(EXIT_SUCCESS);
 }
 
 int main(int argc, char ** argv)
